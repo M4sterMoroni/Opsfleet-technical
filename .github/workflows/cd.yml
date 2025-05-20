@@ -1,0 +1,89 @@
+name: Terraform CD
+
+on:
+  push:
+    branches:
+      - main
+      - develop # Or your staging branch name
+    paths:
+      - 'modules/eks_karpenter_stack/**'
+      - 'environments/**'
+
+permissions:
+  contents: read
+  id-token: write # Required for OIDC AWS authentication
+  # issues: write # For manual-approval action if it creates issues
+
+jobs:
+  terraform_cd:
+    name: Terraform CD Apply
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Determine Environment Path and Config
+        id: set_env_vars
+        run: |
+          if [ "${{ github.ref }}" == "refs/heads/main" ]; then
+            echo "env_path=environments/prod" >> $GITHUB_OUTPUT
+            echo "tf_state_bucket=${{ secrets.TF_STATE_BUCKET_PROD }}" >> $GITHUB_OUTPUT
+            echo "tf_state_key=${{ secrets.TF_STATE_KEY_PROD }}" >> $GITHUB_OUTPUT
+            echo "aws_iam_role_arn=${{ secrets.AWS_IAM_ROLE_ARN_PROD }}" >> $GITHUB_OUTPUT
+          elif [ "${{ github.ref }}" == "refs/heads/develop" ]; then
+            echo "env_path=environments/dev" >> $GITHUB_OUTPUT
+            echo "tf_state_bucket=${{ secrets.TF_STATE_BUCKET_DEV }}" >> $GITHUB_OUTPUT
+            echo "tf_state_key=${{ secrets.TF_STATE_KEY_DEV }}" >> $GITHUB_OUTPUT
+            echo "aws_iam_role_arn=${{ secrets.AWS_IAM_ROLE_ARN_DEV }}" >> $GITHUB_OUTPUT
+          else
+            echo "Branch not configured for CD. Exiting."
+            exit 1
+          fi
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.5.0" # Match CI version
+
+      - name: Configure AWS Credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ steps.set_env_vars.outputs.aws_iam_role_arn }}
+          aws-region: ${{ secrets.TF_STATE_REGION || vars.AWS_REGION || 'us-east-1' }}
+
+      - name: Terraform Init
+        working-directory: ${{ steps.set_env_vars.outputs.env_path }}
+        run: |
+          terraform init \\
+            -backend-config="bucket=${{ steps.set_env_vars.outputs.tf_state_bucket }}" \\
+            -backend-config="key=${{ steps.set_env_vars.outputs.tf_state_key }}" \\
+            -backend-config="region=${{ secrets.TF_STATE_REGION }}" \\
+            -backend-config="use_lockfile=true"
+
+      - name: Terraform Apply (Dev/Staging)
+        if: github.ref == 'refs/heads/develop' # Or your staging branch
+        working-directory: ${{ steps.set_env_vars.outputs.env_path }}
+        run: terraform apply -auto-approve -input=false
+
+      - name: Terraform Plan (Prod)
+        if: github.ref == 'refs/heads/main'
+        working-directory: ${{ steps.set_env_vars.outputs.env_path }}
+        run: terraform plan -out=tfplan -input=false
+
+      - name: Manual Approval for Production Apply
+        if: github.ref == 'refs/heads/main'
+        uses: trstringer/manual-approval@v1
+        with:
+          secret: ${{ secrets.GITHUB_TOKEN }} # Needs repo-scoped token, or a PAT with repo access
+          approvers: your-github-username # Replace with actual GitHub usernames or a team
+          minimum-approvals: 1
+          issue-title: "Deploy to Production: ${{ steps.set_env_vars.outputs.env_path }}"
+          issue-body: |
+            Please approve or reject the Terraform apply to production for path: ${{ steps.set_env_vars.outputs.env_path }}.
+            Plan file: tfplan (available in workflow artifacts if uploaded, or review PR plan for commit).
+
+      - name: Terraform Apply (Prod)
+        if: github.ref == 'refs/heads/main' # This will only run if the manual approval step passes
+        working-directory: ${{ steps.set_env_vars.outputs.env_path }}
+        run: terraform apply -auto-approve tfplan # Apply the plan generated earlier for prod 

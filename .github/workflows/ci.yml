@@ -1,0 +1,124 @@
+name: Terraform CI
+
+on:
+  pull_request:
+    branches:
+      - main
+      - develop # Or your staging branch name
+    paths:
+      - 'modules/eks_karpenter_stack/**'
+      - 'environments/**'
+
+permissions:
+  contents: read
+  pull-requests: write # To comment plan output on PRs
+  id-token: write # Required for OIDC AWS authentication
+  actions: read # For Checkov to read GITHUB_TOKEN
+  security-events: write # For Checkov to write SARIF results
+
+jobs:
+  terraform_ci:
+    name: Terraform CI Plan & Scan
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        # Plan for dev environment by default on PRs.
+        environment_path: ["environments/dev"]
+
+        aws_iam_role_arn_secret_name: ["AWS_IAM_ROLE_ARN_DEV"] 
+    defaults:
+      run:
+        working-directory: ${{ matrix.environment_path }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.5.0"
+
+      - name: Configure AWS Credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets[matrix.aws_iam_role_arn_secret_name] }}
+          aws-region: ${{ secrets.TF_STATE_REGION || vars.AWS_REGION || 'us-east-1' }}
+          # role-session-name: GitHubActions-${{ github.repository }}-${{ github.run_id }} # Optional
+
+      - name: Terraform Format Check
+        id: fmt
+        run: terraform fmt -check -recursive ../../modules
+        continue-on-error: true
+
+      - name: Terraform Init (Dev)
+        id: init_dev
+        # This specific init is for dev. If matrix expands, use generic role-based init or conditional logic.
+        if: matrix.environment_path == 'environments/dev'
+        run: |
+          terraform init \\
+            -backend-config="bucket=${{ secrets.TF_STATE_BUCKET_DEV }}" \\
+            -backend-config="key=${{ secrets.TF_STATE_KEY_DEV }}" \\
+            -backend-config="region=${{ secrets.TF_STATE_REGION }}" \\
+            -backend-config="use_lockfile=true"
+
+      - name: Terraform Validate
+        id: validate
+        run: terraform validate
+
+      - name: Run Checkov IaC Scanner
+        id: checkov
+        uses: bridgecrewio/checkov-action@v12
+        with:
+          directory: ${{ matrix.environment_path }}
+          framework: terraform
+          output_format: cli,sarif
+          output_file_path: console.txt,results.sarif
+        env:
+          LOG_LEVEL: WARNING
+
+      - name: Upload Checkov SARIF report
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: ${{ matrix.environment_path }}/results.sarif
+
+      - name: Terraform Plan
+        id: plan
+        run: terraform plan -no-color -input=false -out=tfplan
+        continue-on-error: true
+
+      - name: Comment Plan Output on PR
+        uses: actions/github-script@v7
+        if: github.event_name == 'pull_request'
+        env:
+          PLAN: "${{ steps.plan.outputs.stdout || steps.plan.outputs.stderr }}"
+          CHECKOV_OUTCOME: "${{ steps.checkov.outcome }}"
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const plan_output = `#### Terraform Plan for \`${{ matrix.environment_path }}\` 📖\`${{ steps.plan.outcome }}\`
+
+            <details><summary>Show Plan</summary>
+
+            \`\`\`terraform
+            ${process.env.PLAN}
+            \`\`\`
+
+            </details>`;
+
+            const checkov_summary = `#### Checkov Scan Summary for \`${{ matrix.environment_path }}\` 🛡️\`${process.env.CHECKOV_OUTCOME}\`
+            (See 'Security' tab for details if SARIF upload was successful)`;
+
+            const final_comment = `${plan_output}\\n\\n${checkov_summary}\\n\\n*Pusher: @${{ github.actor }}, Action: ${{ github.event_name }}*`;
+
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: final_comment
+            })
+
+      - name: Check Plan and Checkov Status
+        if: steps.plan.outcome == 'failure' || (steps.checkov.outcome == 'failure' && steps.checkov.outputs.soft_fail != 'true')
+        run: exit 1 
