@@ -4,6 +4,12 @@ This repository contains Terraform code to deploy an Amazon EKS (Elastic Kuberne
 
 This project is structured to be CI/CD friendly, using a modular approach where the core infrastructure is defined in a reusable module (`modules/eks_karpenter_stack`) and specific environments (e.g., `dev`, `staging`, `prod`) are defined in the `environments` directory.
 
+## Architecture Diagram
+
+The following diagram illustrates the overall architecture of the EKS cluster, VPC, Karpenter setup, and the enhanced ingress path including AWS WAF and Amazon CloudFront:
+
+![EKS Karpenter Architecture](./eks_karpenter_architecture_v5.png) 
+
 ## Prerequisites
 
 Before you begin, ensure you have the following installed and configured:
@@ -18,10 +24,15 @@ Before you begin, ensure you have the following installed and configured:
 ```
 .
 ├── README.md
+├── diagram.py # Generates the architecture diagram
+├── eks_karpenter_architecture_v5.png # Example diagram output
 ├── modules
-│   └── eks_karpenter_stack  // Reusable module for VPC, EKS, and Karpenter
+│   └── eks_karpenter_stack  // Reusable module for VPC, EKS, Karpenter, and Ingress
 │       ├── eks.tf
+│       ├── iam.tf
+│       ├── ingress.tf      // New: WAF and CloudFront resources
 │       ├── karpenter.tf
+│       ├── main.tf         // Placeholder or core module composition
 │       ├── outputs.tf
 │       ├── variables.tf
 │       ├── versions.tf
@@ -631,3 +642,57 @@ Persistent storage with EBS is reliable, but you are still responsible for backu
 *   **Velero**: An open-source tool to back up and restore Kubernetes cluster resources and persistent volumes.
 
 By combining Kubernetes primitives for stateful applications (like `StatefulSets` and `PVCs`) with the `aws-ebs-csi-driver` and Karpenter's efficient node provisioning, you can effectively run stateful workloads on your EKS cluster.
+
+## Module Features and Configuration
+
+This Terraform module (`modules/eks_karpenter_stack`) is designed to be reusable and configurable through input variables.
+
+### Core Components:
+*   **VPC**: Creates a new Virtual Private Cloud with public and private subnets across multiple Availability Zones.
+*   **EKS Cluster**: Deploys a managed Kubernetes cluster using the `terraform-aws-modules/eks/aws` module.
+*   **Karpenter Integration**: Sets up IAM roles and configurations necessary for Karpenter to manage worker nodes efficiently.
+*   **IRSA (IAM Roles for Service Accounts)**: Enabled by default for secure pod-level AWS permissions.
+
+### Ingress Security and Delivery (Optional)
+
+To enhance security, performance, and reliability for applications exposed to the internet, the module can optionally deploy AWS WAF and Amazon CloudFront in front of an Application Load Balancer (ALB) that serves your EKS workloads.
+
+*   **AWS WAF (Web Application Firewall)**: Protects your web applications from common web exploits that could affect application availability, compromise security, or consume excessive resources. A default WebACL is configured with `AWSManagedRulesCommonRuleSet`.
+*   **Amazon CloudFront**: A fast content delivery network (CDN) service that securely delivers data, videos, applications, and APIs to customers globally with low latency and high transfer speeds. It also provides an additional layer of DDoS mitigation.
+
+**Benefits:**
+*   **Enhanced Security**: WAF filters malicious traffic before it reaches your ALB and applications.
+*   **Improved Performance & Lower Latency**: CloudFront caches content closer to your users.
+*   **DDoS Protection**: CloudFront and WAF help absorb and mitigate DDoS attacks.
+*   **Cost Optimization**: Caching can reduce data transfer out costs from the ALB.
+
+**Configuration Variables for Ingress:**
+
+These variables are defined in `modules/eks_karpenter_stack/variables.tf`:
+
+*   `enable_cloudfront_waf` (bool): Set to `true` to create the CloudFront distribution and WAF WebACL. Defaults to `false`.
+*   `alb_dns_name` (string): **Required if `enable_cloudfront_waf` is true.** The DNS name of the Application Load Balancer that CloudFront will point to. This ALB is typically managed by an Ingress controller (e.g., AWS Load Balancer Controller) within your EKS cluster.
+*   `custom_domain_names` (list(string)): Optional list of custom domain names (e.g., `['app.example.com']`) for the CloudFront distribution. If provided, `acm_certificate_arn` is also required.
+*   `acm_certificate_arn` (string): Optional ACM certificate ARN for the custom domain names. Required if `custom_domain_names` is not empty.
+
+**Important Considerations:**
+*   The Application Load Balancer (ALB) itself is expected to be provisioned by a Kubernetes Ingress controller based on your application's Ingress resources. This module provisions the CloudFront and WAF to front an *existing* ALB DNS name.
+*   The CloudFront distribution is configured to log to an S3 bucket. You **must** update the `bucket` parameter within the `logging_config` block in `modules/eks_karpenter_stack/ingress.tf` to a valid S3 bucket that you own and have configured for CloudFront logging, or parameterize this via a variable.
+
+## Module Outputs
+
+The `modules/eks_karpenter_stack` module provides several outputs, including:
+
+*   VPC details (`vpc_id`, `public_subnets`, `private_subnets`)
+*   EKS Cluster details (`eks_cluster_id`, `eks_cluster_arn`, `eks_cluster_endpoint`, `eks_oidc_provider_arn`)
+*   Karpenter related IAM roles and SQS queue ARNs (`karpenter_node_role_arn`, `karpenter_controller_role_arn`, `karpenter_interruption_queue_arn`)
+*   Fluent Bit IAM role ARN (`fluent_bit_iam_role_arn`)
+
+**New Outputs for Ingress (when `enable_cloudfront_waf` is true):**
+
+*   `cloudfront_distribution_id`: ID of the CloudFront distribution.
+*   `cloudfront_distribution_domain_name`: Domain name of the CloudFront distribution. This is the primary URL you would point your users to, or CNAME your custom domains to.
+*   `cloudfront_distribution_hosted_zone_id`: Route 53 hosted zone ID for the CloudFront distribution (useful for creating ALIAS records in Route 53).
+*   `waf_web_acl_arn`: ARN of the WAF Web ACL associated with the CloudFront distribution.
+
+For a full list, refer to `modules/eks_karpenter_stack/outputs.tf`.

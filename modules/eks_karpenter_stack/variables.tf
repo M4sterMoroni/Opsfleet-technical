@@ -36,7 +36,32 @@ variable "cluster_version" {
 }
 
 variable "enable_irsa" {
-  description = "Whether to create an IAM OIDC provider and enable IRSA."
+  description = "Enable IRSA for the EKS cluster."
   type        = bool
   default     = true
+}
+
+# Variables for CloudFront and WAF
+variable "enable_cloudfront_waf" {
+  description = "Set to true to create CloudFront distribution and WAF WebACL for the ALB."
+  type        = bool
+  default     = false
+}
+
+variable "alb_dns_name" {
+  description = "DNS name of the Application Load Balancer to be fronted by CloudFront. Required if enable_cloudfront_waf is true."
+  type        = string
+  default     = ""
+}
+
+variable "custom_domain_names" {
+  description = "Optional: List of custom domain names (e.g., ['app.example.com']) for the CloudFront distribution. Requires acm_certificate_arn."
+  type        = list(string)
+  default     = []
+}
+
+variable "acm_certificate_arn" {
+  description = "Optional: ACM certificate ARN for the custom domain names specified in custom_domain_names. Required if custom_domain_names is not empty."
+  type        = string
+  default     = ""
 } 
