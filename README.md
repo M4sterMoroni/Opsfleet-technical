@@ -255,16 +255,6 @@ To destroy all the resources created by Terraform in a specific environment (e.g
     terraform destroy
     ```
 
-## Further Enhancements (TODO)
-
-*   Implement more granular IAM permissions for Karpenter controller and nodes within the module.
-*   Add detailed monitoring and logging for Karpenter and the EKS cluster. **(Partially Done: EKS control plane logs, Karpenter controller metrics enabled, Fluent Bit IAM role and Helm chart added for log forwarding. Full stack requires user deployment of Prometheus/Grafana & Fluent Bit data consumption.)**
-*   Configure advanced network policies. **(Done: AWS VPC CNI Network Policy enforcement enabled.)**
-*   Add examples for stateful workloads.
-*   Include different NodePools for on-demand instances if specific workloads require them (configurable per environment).
-*   Add `staging` and `prod` environment examples with distinct configurations (e.g., different instance sizes, VPC CIDRs, cluster names).
-*   Integrate with a CI/CD system (e.g., GitHub Actions, GitLab CI, AWS CodePipeline) to automate deployments per environment.
-
 ## CI/CD Automation with GitHub Actions
 
 This project includes GitHub Actions workflows located in the `.github/workflows` directory to automate testing, security scanning, and deployment of the infrastructure.
@@ -498,3 +488,146 @@ spec:
     - protocol: TCP
       port: 8080
 ```
+
+## Examples for Stateful Workloads
+
+Karpenter itself is stateless, but it provisions nodes that can run stateful workloads. Stateful applications typically require persistent storage. With an EKS cluster and the `aws-ebs-csi-driver` (which is installed by this module), you can use Kubernetes `PersistentVolumeClaims` (PVCs) and `PersistentVolumes` (PVs) backed by AWS EBS volumes.
+
+**Note on Production Databases:** While the following example demonstrates how to run a custom stateful application on EKS, for production relational or NoSQL databases (e.g., PostgreSQL, MySQL, MongoDB), it is generally recommended to use AWS managed database services like Amazon RDS, Amazon Aurora, or Amazon DocumentDB for their enhanced reliability, manageability, backup, and scaling features. The example below is for generic stateful applications or those not well-suited to a managed service.
+
+### 1. Default EBS StorageClass
+
+The `aws-ebs-csi-driver` automatically creates a default `StorageClass` named `gp2` (or `gp3` if `gp3` is set as default on the AWS account/region, or if you create a `gp3` storage class and make it default). You can check available StorageClasses:
+
+```bash
+kubectl get sc
+```
+
+### 2. Example: Persistent Data Writer Application
+
+Here's an example of deploying a simple application that continuously writes the current timestamp to a file on a persistent volume. This PVC will dynamically provision an EBS volume using the default StorageClass.
+
+**`persistent-writer-deployment.yaml`**:
+```yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: persistent-writer-svc
+  labels:
+    app: persistent-writer
+spec:
+  ports:
+    - port: 80
+  selector:
+    app: persistent-writer
+  clusterIP: None # Headless service as it's a simple writer
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: persistent-writer-pvc
+  labels:
+    app: persistent-writer
+spec:
+  accessModes:
+    - ReadWriteOnce # EBS volumes are ReadWriteOnce
+  resources:
+    requests:
+      storage: 5Gi # Request 5 GiB of storage
+  # storageClassName: gp2 # Explicitly specify, or use default
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: persistent-writer-deployment
+  labels:
+    app: persistent-writer
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: persistent-writer
+  template:
+    metadata:
+      labels:
+        app: persistent-writer
+    spec:
+      nodeSelector:
+        kubernetes.io/arch: "amd64"
+      containers:
+        - name: writer-container
+          image: alpine:latest 
+          command: ["/bin/sh", "-c"]
+          args:
+            - >
+              apk add --no-cache coreutils;
+              echo "Starting persistent writer...";
+              while true; do
+                echo "Timestamp: $(date)" >> /data/output.log;
+                echo "Wrote timestamp to /data/output.log";
+                sleep 10;
+              done
+          volumeMounts:
+            - mountPath: /data
+              name: data-volume
+      volumes:
+        - name: data-volume
+          persistentVolumeClaim:
+            claimName: persistent-writer-pvc
+```
+
+**To deploy:**
+
+```bash
+kubectl apply -f persistent-writer-deployment.yaml
+```
+
+**To check logs from the writer (and see the file path):**
+```bash
+kubectl logs -f deployment/persistent-writer-deployment
+# Once the pod is running, you can exec into it to see the file:
+# kubectl exec -it <pod-name> -- tail -f /data/output.log
+```
+
+**Explanation:**
+
+*   **`PersistentVolumeClaim (persistent-writer-pvc)`**: Requests 5GiB of storage. Kubernetes will dynamically provision an EBS volume using the default `StorageClass`. The `accessModes: ReadWriteOnce` is important as standard EBS volumes can only be mounted by a single node at a time.
+*   **`Deployment (persistent-writer-deployment)`**:
+    *   Uses an `alpine` image.
+    *   The container runs a simple loop that appends the current timestamp to `/data/output.log` every 10 seconds.
+    *   Mounts the PVC into the container at `/data`. This ensures that if the pod is rescheduled to a different node (that supports mounting the EBS volume, i.e., in the same AZ), the `output.log` file persists.
+*   **`nodeSelector`**: Included to demonstrate that you can still control placement.
+
+### 3. Karpenter Considerations for Stateful Workloads
+
+*   **Node Provisioning**: If you deploy a stateful pod and no existing nodes can satisfy its resource requests (CPU, memory) or scheduling constraints (node selectors, affinities, taints/tolerations), Karpenter will provision a new node. The EBS volume will then be created and attached to this new node.
+*   **Availability Zones (AZs)**: EBS volumes are AZ-specific. A pod using an EBS volume can only run in the same AZ as its volume. If Karpenter provisions a node in `us-east-1a` and the EBS CSI driver creates a volume in `us-east-1a`, the pod consuming that PVC must run on a node in `us-east-1a`.
+    *   If you are using `topologySpreadConstraints` or `podAntiAffinity` that might place pods of a StatefulSet across AZs, ensure your storage provisioning strategy supports this (e.g., by creating StorageClasses pinned to specific AZs or using replication solutions at the application layer).
+*   **Node Termination & Draining**: When a node running a stateful pod is to be terminated (e.g., due to Karpenter consolidation or Spot interruption), Karpenter will attempt to gracefully drain the node. For pods that are part of a `StatefulSet`, Kubernetes handles ordered termination and replacement. The EBS volume will be detached from the old node and can then be attached to a new node where the replacement pod is scheduled.
+*   **Custom StorageClasses**: You can define custom `StorageClass` resources to specify different EBS volume types (e.g., `io1`, `sc1`, `st1`), configure IOPS, encryption, or specify a particular `availabilityZone`.
+
+    Example of a `gp3` StorageClass:
+    ```yaml
+    apiVersion: storage.k8s.io/v1
+    kind: StorageClass
+    metadata:
+      name: ebs-gp3-sc
+    provisioner: ebs.csi.aws.com
+    volumeBindingMode: WaitForFirstConsumer 
+    parameters:
+      type: gp3
+      fsType: ext4 # Or xfs
+    # allowVolumeExpansion: true 
+    ```
+    To use this, your PVC would specify `storageClassName: ebs-gp3-sc`.
+    The `volumeBindingMode: WaitForFirstConsumer` setting is important. It delays the binding and provisioning of a PersistentVolume until a pod using the PVC is scheduled. This allows the scheduler to consider pod constraints (like AZ affinity) when choosing a node, and then the EBS volume can be created in the correct AZ.
+
+### 4. Backup and Disaster Recovery
+
+Persistent storage with EBS is reliable, but you are still responsible for backup and disaster recovery strategies for your application data. Consider using:
+
+*   **EBS Snapshots**: Regularly snapshot your EBS volumes. This can be automated with AWS Backup or custom scripts.
+*   **Application-Level Replication**: For databases or critical stateful services, use their built-in replication features (e.g., PostgreSQL streaming replication) across AZs or even regions for higher availability.
+*   **Velero**: An open-source tool to back up and restore Kubernetes cluster resources and persistent volumes.
+
+By combining Kubernetes primitives for stateful applications (like `StatefulSets` and `PVCs`) with the `aws-ebs-csi-driver` and Karpenter's efficient node provisioning, you can effectively run stateful workloads on your EKS cluster.
