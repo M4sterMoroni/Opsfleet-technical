@@ -258,8 +258,8 @@ To destroy all the resources created by Terraform in a specific environment (e.g
 ## Further Enhancements (TODO)
 
 *   Implement more granular IAM permissions for Karpenter controller and nodes within the module.
-*   Add detailed monitoring and logging for Karpenter and the EKS cluster. **(Partially Done: EKS control plane logs, Karpenter controller metrics enabled, Fluent Bit IAM role created. Full stack requires user deployment of Prometheus/Grafana & Fluent Bit.)**
-*   Configure advanced network policies.
+*   Add detailed monitoring and logging for Karpenter and the EKS cluster. **(Partially Done: EKS control plane logs, Karpenter controller metrics enabled, Fluent Bit IAM role and Helm chart added for log forwarding. Full stack requires user deployment of Prometheus/Grafana & Fluent Bit data consumption.)**
+*   Configure advanced network policies. **(Done: AWS VPC CNI Network Policy enforcement enabled.)**
 *   Add examples for stateful workloads.
 *   Include different NodePools for on-demand instances if specific workloads require them (configurable per environment).
 *   Add `staging` and `prod` environment examples with distinct configurations (e.g., different instance sizes, VPC CIDRs, cluster names).
@@ -344,15 +344,81 @@ terraform {
 
 This module facilitates the collection of important logs and metrics:
 
-*   **EKS Control Plane Logs**: All EKS control plane log types (`api`, `audit`, `authenticator`, `controllerManager`, `scheduler`) are enabled and configured to be sent to AWS CloudWatch Logs.
-*   **Karpenter Controller Metrics**: The Karpenter controller is configured via its Helm chart to expose Prometheus-compatible metrics on port `8080`. You will need to deploy a Prometheus instance (such as Amazon Managed Service for Prometheus - AMP, or a self-managed Prometheus) and configure it to scrape the Karpenter controller pods on this port (usually via the `karpenter` service in the `kube-system` or `karpenter` namespace).
-*   **Karpenter Controller Logs**: Logs from the Karpenter controller pods can be collected using a standard Kubernetes logging solution (e.g., Fluent Bit) and sent to a central logging system like CloudWatch Logs.
-*   **Application & Node Logs (via Fluent Bit)**: An IAM role (`${var.cluster_name}-FluentBitRole`) has been created with the necessary permissions for Fluent Bit to send logs to CloudWatch Logs. To enable log collection from your applications and nodes, you should:
-    1.  Deploy Fluent Bit (or a similar log forwarder) as a DaemonSet to your cluster.
-    2.  Configure the Fluent Bit service account to assume the created IAM role using IRSA. The role is pre-configured to trust a service account named `fluent-bit` in the `logging` namespace. You may need to adjust the namespace and service account name in `modules/eks_karpenter_stack/iam.tf` (resource `aws_iam_role.fluent_bit_role`) if your Fluent Bit deployment uses different names.
-    3.  Configure Fluent Bit to collect logs from desired sources (e.g., container logs, system logs) and forward them to CloudWatch Logs.
+*   **EKS Control Plane Logs**: All EKS control plane log types (`api`, `audit`, `authenticator`, `controllerManager`, `scheduler`) are enabled and configured to be sent to AWS CloudWatch Logs. This is handled by the EKS module.
+*   **Karpenter Controller Metrics**: The Karpenter controller is configured via its Helm chart to expose Prometheus-compatible metrics on port `8080`. You will need to deploy a Prometheus instance (such as Amazon Managed Service for Prometheus - AMP, or a self-managed Prometheus) and configure it to scrape the Karpenter controller pods.
+*   **Karpenter Controller Logs**: Logs from the Karpenter controller pods can be collected using a standard Kubernetes logging solution and sent to a central logging system.
+*   **Application & Node Logs (Log Forwarding Agent)**:
+    *   **IAM Role**: An IAM role (`${var.cluster_name}-FluentBitRole`, output as `fluent_bit_iam_role_arn`) is created by this module with the necessary permissions for a logging agent like Fluent Bit to send logs to CloudWatch Logs. This role is pre-configured to trust a service account named `fluent-bit` in the `logging` namespace. You can adjust the trusted service account name and namespace in `modules/eks_karpenter_stack/iam.tf` if needed.
+    *   **Logging Agent Deployment**: You are responsible for deploying a logging agent (e.g., Fluent Bit, Datadog, Splunk) to your cluster. When configuring your chosen agent, ensure its Kubernetes service account is configured to assume the IAM role provided by this module (`fluent_bit_iam_role_arn`) to grant it permissions to send logs to AWS CloudWatch Logs (or other desired destinations if you customize the role's policy).
 
-### Example: Visualizing Karpenter Metrics with Prometheus and Grafana
+### Example: Deploying Fluent Bit in an Environment (e.g., `environments/prod/logging.tf`)
+
+If you choose to use Fluent Bit, you can deploy it via its Helm chart in your environment-specific Terraform configuration. Here's a conceptual example:
+
+```terraform
+# environments/prod/logging.tf
+
+provider "helm" {
+  kubernetes {
+    host                   = module.eks_karpenter_stack.eks_cluster_endpoint
+    cluster_ca_certificate = base64decode(module.eks_karpenter_stack.eks_cluster_certificate_authority_data)
+    token                  = data.aws_eks_cluster_auth.this.token # Assumes you have a data source for EKS auth
+  }
+}
+
+data "aws_eks_cluster_auth" "this" {
+  name = module.eks_karpenter_stack.eks_cluster_id
+}
+
+locals {
+  fluent_bit_helm_config = {
+    chart      = "aws-for-fluent-bit"
+    repository = "https://aws.github.io/eks-charts"
+    version    = "0.1.31" # Or your desired version
+    namespace  = "logging"  # Should match namespace in the IAM role trust
+    create_namespace = true
+  }
+  fluent_bit_log_group_name_prefix = "/aws/containerinsights/${module.eks_karpenter_stack.eks_cluster_id}"
+}
+
+resource "helm_release" "fluent_bit_prod" {
+  name       = "fluent-bit"
+  chart      = local.fluent_bit_helm_config.chart
+  repository = local.fluent_bit_helm_config.repository
+  version    = local.fluent_bit_helm_config.version
+  namespace  = local.fluent_bit_helm_config.namespace
+  create_namespace = local.fluent_bit_helm_config.create_namespace
+
+  set {
+    name  = "serviceAccount.create"
+    value = "true"
+  }
+  set {
+    name  = "serviceAccount.name"
+    value = "fluent-bit" # Should match SA name in IAM role trust
+  }
+  set {
+    name  = "serviceAccount.annotations.eks\.amazonaws\.com/role-arn" # Note: dot needs escaping for terraform set block
+    value = module.eks_karpenter_stack.fluent_bit_iam_role_arn
+  }
+
+  values = [
+    yamlencode({
+      cloudWatchLogs = {
+        enabled    = true
+        region     = module.eks_karpenter_stack.aws_region # Use region from module output
+        logGroupName = "${local.fluent_bit_log_group_name_prefix}/application"
+      }
+    })
+  ]
+
+  depends_on = [
+    module.eks_karpenter_stack # Ensure cluster and IAM role are ready
+  ]
+}
+```
+
+### Visualizing Karpenter Metrics with Prometheus and Grafana
 
 While this module does not deploy a full Prometheus and Grafana stack, here's a conceptual overview:
 
@@ -382,4 +448,53 @@ While this module does not deploy a full Prometheus and Grafana stack, here's a 
 4.  **Add Prometheus Data Source**: Configure Grafana to use your Prometheus instance as a data source.
 5.  **Import Karpenter Dashboard**: Karpenter provides sample Grafana dashboards. You can find them in the [Karpenter GitHub repository](https://github.com/aws/karpenter/tree/main/grafana) and import them into your Grafana.
 
-*   Integrate with a CI/CD system (e.g., GitHub Actions, GitLab CI, AWS CodePipeline) to automate deployments per environment. **(Done via GitHub Actions)**
+## Network Policies
+
+This module enables Kubernetes Network Policy enforcement via the AWS VPC CNI plugin. This allows you to define fine-grained network traffic rules between your pods using standard `NetworkPolicy` Kubernetes resources.
+
+By default, if no network policies are applied to a namespace, all ingress and egress traffic is allowed to and from pods in that namespace. Once any network policy is applied to a pod, it becomes "isolated," and only traffic explicitly allowed by a policy will be permitted.
+
+### Example: Deny all traffic to an application
+
+To deny all ingress traffic to pods with the label `app: my-secure-app` in the `default` namespace, you could apply the following:
+
+```yaml
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: deny-all-my-secure-app
+  namespace: default
+spec:
+  podSelector:
+    matchLabels:
+      app: my-secure-app
+  policyTypes:
+  - Ingress
+  # No ingress rules defined, so all ingress is denied
+```
+
+### Example: Allow traffic from a specific namespace
+
+To allow pods in namespace `frontend-ns` to connect to pods labelled `app: my-backend` on port `8080` in namespace `backend-ns`:
+
+```yaml
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-frontend-to-backend
+  namespace: backend-ns
+spec:
+  podSelector:
+    matchLabels:
+      app: my-backend
+  policyTypes:
+  - Ingress
+  ingress:
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: frontend-ns # or a custom label for the namespace
+    ports:
+    - protocol: TCP
+      port: 8080
+```

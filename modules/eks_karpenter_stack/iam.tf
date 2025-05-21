@@ -39,6 +39,11 @@ resource "aws_iam_role_policy_attachment" "karpenter_node_ssm_managed_instance_c
   role       = aws_iam_role.karpenter_node_role.name
 }
 
+resource "aws_iam_role_policy_attachment" "karpenter_node_cloudwatch_agent_server_policy" {
+  policy_arn = "arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy"
+  role       = aws_iam_role.karpenter_node_role.name
+}
+
 resource "aws_iam_instance_profile" "karpenter_node_instance_profile" {
   name = "${var.cluster_name}-KarpenterNodeProfile"
   role = aws_iam_role.karpenter_node_role.name
@@ -67,7 +72,6 @@ data "aws_iam_policy_document" "karpenter_controller_assume_role_policy" {
 
     condition {
       test     = "StringEquals"
-      # Use replace to remove "https://" from the OIDC issuer URL for the condition
       variable = "${replace(module.eks.cluster_oidc_issuer_url, "https://", "")}:sub"
       values   = ["system:serviceaccount:${var.karpenter_service_account_namespace}:${var.karpenter_service_account_name}"]
     }
@@ -360,7 +364,7 @@ resource "aws_iam_role_policy_attachment" "karpenter_controller_policy_attach" {
 resource "aws_sqs_queue" "karpenter_interruption_queue" {
   name                        = local.karpenter_interruption_queue_name
   message_retention_seconds   = 300
-  sqs_managed_sse_enabled     = true # Enable server-side encryption using SQS owned encryption keys
+  sqs_managed_sse_enabled     = true 
 
   tags = {
     Name                                      = local.karpenter_interruption_queue_name
@@ -378,7 +382,7 @@ resource "aws_sqs_queue_policy" "karpenter_interruption_queue_policy" {
       {
         Effect    = "Allow"
         Principal = {
-          Service = ["events.amazonaws.com", "sqs.amazonaws.com"] # Allow EventBridge and SQS itself to send messages
+          Service = ["events.amazonaws.com", "sqs.amazonaws.com"] 
         }
         Action    = "sqs:SendMessage"
         Resource  = aws_sqs_queue.karpenter_interruption_queue.arn
@@ -490,8 +494,6 @@ data "aws_iam_policy_document" "fluent_bit_assume_role_policy" {
     condition {
       test     = "StringEquals"
       variable = "${replace(module.eks.cluster_oidc_issuer_url, "https://", "")}:sub"
-      # Assuming Fluent Bit runs in 'logging' namespace with 'fluent-bit' service account
-      # Users will need to create this SA and namespace, or adjust these values.
       values   = ["system:serviceaccount:logging:fluent-bit"]
     }
     condition {

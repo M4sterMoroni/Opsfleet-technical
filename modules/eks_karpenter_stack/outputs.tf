@@ -75,7 +75,7 @@ output "karpenter_interruption_queue_name" {
 
 output "karpenter_node_iam_instance_profile_name" {
   description = "The name of the IAM instance profile for Karpenter-provisioned nodes."
-  value       = aws_iam_instance_profile.karpenter_node.name
+  value       = aws_iam_instance_profile.karpenter_node_instance_profile.name
 }
 
 output "fluent_bit_iam_role_arn" {
