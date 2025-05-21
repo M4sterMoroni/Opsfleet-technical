@@ -258,7 +258,7 @@ To destroy all the resources created by Terraform in a specific environment (e.g
 ## Further Enhancements (TODO)
 
 *   Implement more granular IAM permissions for Karpenter controller and nodes within the module.
-*   Add detailed monitoring and logging for Karpenter and the EKS cluster.
+*   Add detailed monitoring and logging for Karpenter and the EKS cluster. **(Partially Done: EKS control plane logs, Karpenter controller metrics enabled, Fluent Bit IAM role created. Full stack requires user deployment of Prometheus/Grafana & Fluent Bit.)**
 *   Configure advanced network policies.
 *   Add examples for stateful workloads.
 *   Include different NodePools for on-demand instances if specific workloads require them (configurable per environment).
@@ -339,5 +339,47 @@ terraform {
   }
 }
 ```
+
+## Monitoring and Logging
+
+This module facilitates the collection of important logs and metrics:
+
+*   **EKS Control Plane Logs**: All EKS control plane log types (`api`, `audit`, `authenticator`, `controllerManager`, `scheduler`) are enabled and configured to be sent to AWS CloudWatch Logs.
+*   **Karpenter Controller Metrics**: The Karpenter controller is configured via its Helm chart to expose Prometheus-compatible metrics on port `8080`. You will need to deploy a Prometheus instance (such as Amazon Managed Service for Prometheus - AMP, or a self-managed Prometheus) and configure it to scrape the Karpenter controller pods on this port (usually via the `karpenter` service in the `kube-system` or `karpenter` namespace).
+*   **Karpenter Controller Logs**: Logs from the Karpenter controller pods can be collected using a standard Kubernetes logging solution (e.g., Fluent Bit) and sent to a central logging system like CloudWatch Logs.
+*   **Application & Node Logs (via Fluent Bit)**: An IAM role (`${var.cluster_name}-FluentBitRole`) has been created with the necessary permissions for Fluent Bit to send logs to CloudWatch Logs. To enable log collection from your applications and nodes, you should:
+    1.  Deploy Fluent Bit (or a similar log forwarder) as a DaemonSet to your cluster.
+    2.  Configure the Fluent Bit service account to assume the created IAM role using IRSA. The role is pre-configured to trust a service account named `fluent-bit` in the `logging` namespace. You may need to adjust the namespace and service account name in `modules/eks_karpenter_stack/iam.tf` (resource `aws_iam_role.fluent_bit_role`) if your Fluent Bit deployment uses different names.
+    3.  Configure Fluent Bit to collect logs from desired sources (e.g., container logs, system logs) and forward them to CloudWatch Logs.
+
+### Example: Visualizing Karpenter Metrics with Prometheus and Grafana
+
+While this module does not deploy a full Prometheus and Grafana stack, here's a conceptual overview:
+
+1.  **Deploy Prometheus**: Use the `kube-prometheus-stack` Helm chart or set up Amazon Managed Service for Prometheus (AMP).
+2.  **Configure Scraping**: Ensure Prometheus is configured to scrape the Karpenter controller service. If using `kube-prometheus-stack`, a `ServiceMonitor` CRD might be automatically created by the Karpenter chart if enabled (check Karpenter chart options), or you may need to create one or add to Prometheus's scrape_configs.
+    ```yaml
+    # Example ServiceMonitor for Karpenter (if not created by chart)
+    apiVersion: monitoring.coreos.com/v1
+    kind: ServiceMonitor
+    metadata:
+      name: karpenter-metrics
+      namespace: kube-system # Or your Karpenter namespace
+      labels:
+        release: prometheus # Or your Prometheus release label
+    spec:
+      selector:
+        matchLabels:
+          app.kubernetes.io/name: karpenter # Label of the Karpenter metrics service
+      namespaceSelector:
+        matchNames:
+        - kube-system # Or your Karpenter namespace
+      endpoints:
+      - port: http-metrics # Name of the port in Karpenter's service (e.g., 8080)
+        interval: 15s
+    ```
+3.  **Deploy Grafana**: Use the Grafana Helm chart or an existing Grafana instance.
+4.  **Add Prometheus Data Source**: Configure Grafana to use your Prometheus instance as a data source.
+5.  **Import Karpenter Dashboard**: Karpenter provides sample Grafana dashboards. You can find them in the [Karpenter GitHub repository](https://github.com/aws/karpenter/tree/main/grafana) and import them into your Grafana.
 
 *   Integrate with a CI/CD system (e.g., GitHub Actions, GitLab CI, AWS CodePipeline) to automate deployments per environment. **(Done via GitHub Actions)**
