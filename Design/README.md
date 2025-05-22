@@ -4,7 +4,7 @@ This document outlines the proposed cloud architecture for Innovate Inc.'s web a
 
 ## High-Level Architecture Diagram
 
-![Innovate Inc. AWS Architecture](./Design/innovate_inc_aws_architecture.png)
+![Innovate Inc. AWS Architecture](./innovate_inc_aws_architecture.png)
 
 ## 1. Cloud Environment Structure (AWS Account Strategy)
 
