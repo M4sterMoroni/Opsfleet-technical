@@ -128,8 +128,13 @@ Amazon Elastic Kubernetes Service (EKS) will be used to deploy, manage, and scal
         *   **IAM Roles for Nodes**: Assign a unique IAM role to each node group with least-privilege permissions (e.g., permissions to pull images from ECR, write logs to CloudWatch, and necessary EKS permissions).
         *   **Instance Metadata Service (IMDSv2)**: Enforce IMDSv2 on worker nodes to protect against SSRF vulnerabilities.
         *   **Runtime Security**: Implement runtime security monitoring on nodes using tools like Falco, Aqua Security, or Sysdig to detect anomalous behavior and potential intrusions. Consider AWS GuardDuty for EKS runtime monitoring.
-    *   **Instance Types**: Use a mix of EC2 instance types. Consider Graviton for price-performance. Ensure instances chosen have up-to-date CPU microcode.
-    *   **Spot Instances**: Use with caution for production workloads. If used, ensure the application is truly fault-tolerant and that Karpenter/Cluster Autoscaler can quickly replace them. Limit use for security-sensitive components if possible.
+        *   **Compute Options**: While EC2-based worker nodes (via Managed Node Groups or Karpenter) provide maximum flexibility and are suitable for sustained workloads, consider **AWS Fargate for EKS** for specific use cases such as:
+            *   Stateless applications with spiky or unpredictable load.
+            *   Batch processing jobs.
+            *   Development/test environments where eliminating node management simplifies operations.
+            Fargate allows running pods without managing the underlying EC2 instances, trading some control for operational simplicity.
+        *   **Instance Types**: Use a mix of EC2 instance types. Consider Graviton for price-performance. Ensure instances chosen have up-to-date CPU microcode.
+        *   **Spot Instances**: Use with caution for production workloads. If used, ensure the application is truly fault-tolerant and that Karpenter/Cluster Autoscaler can quickly replace them. Limit use for security-sensitive components if possible.
 *   **Scaling**:
     *   **Horizontal Pod Autoscaler (HPA)**: Scale pods based on metrics.
     *   **Cluster Autoscaler / Karpenter**: Scale nodes. Ensure scaling policies are tuned to prevent resource exhaustion while optimizing costs.
@@ -281,6 +286,7 @@ Security is a continuous process, integrated into the entire lifecycle (DevSecOp
     *   **AWS Config**: Enable in all accounts to continuously monitor and record resource configurations. Use conformance packs for compliance checking. Send data to the Log Archive and Security Tooling accounts.
     *   **Runtime Security Monitoring**: For EKS nodes and container workloads (e.g., GuardDuty for EKS, Falco).
     *   **SIEM Integration**: Forward relevant logs (CloudTrail, CloudWatch, VPC Flow Logs, GuardDuty/Security Hub findings, application security logs) from the Log Archive account to a SIEM (e.g., Amazon OpenSearch Service, Splunk) for advanced threat hunting and correlation.
+    *   **Proactive Operational Insights with AIOps**: Enable **Amazon DevOps Guru** to automatically detect operational anomalies and provide actionable recommendations, integrating its findings into the overall monitoring and alerting strategy.
     *   **Incident Response Plan**: Develop and regularly test an incident response plan.
 *   **Logging & Monitoring (Comprehensive & Centralized)**:
     *   **AWS CloudTrail**: Enabled in all accounts, logging to the central Log Archive S3 bucket with integrity validation.
@@ -298,13 +304,14 @@ Security is a continuous process, integrated into the entire lifecycle (DevSecOp
 
 ## 7. Cost Optimization
 
-*   **Right-Sizing**: Continuously monitor and adjust instance sizes for EKS nodes, RDS, and other resources based on actual utilization.
+*   **Right-Sizing**: Continuously monitor and adjust instance sizes for EKS nodes, RDS, and other resources based on actual utilization. This also contributes to the **Sustainability** pillar of the AWS Well-Architected Framework by minimizing resource waste.
 *   **Reserved Instances/Savings Plans**: For predictable workloads (e.g., core EKS nodes, RDS instance), consider Reserved Instances or Savings Plans to significantly reduce costs compared to On-Demand pricing.
 *   **Spot Instances**: Leverage EC2 Spot Instances for EKS worker nodes where appropriate (fault-tolerant workloads) for substantial cost savings. Karpenter can help manage Spot instances effectively.
 *   **Autoscaling**: Implement autoscaling for EKS nodes and pods to match capacity with demand, avoiding over-provisioning.
 *   **Storage Tiering**: Use appropriate S3 storage classes (e.g., S3 Intelligent-Tiering, Glacier for archives).
 *   **Data Transfer Costs**: Be mindful of data transfer costs between AZs and out to the internet. Use PrivateLink where possible for inter-service communication within AWS.
 *   **Budgeting & Tagging**: Use AWS Budgets to set spending limits and alerts. Implement a comprehensive tagging strategy for all resources to track costs by project, environment, or team.
+*   **Metrics Collection**: Beyond standard CloudWatch metrics, instrument applications with **OpenTelemetry (OTel)** SDKs (e.g., using AWS Distro for OpenTelemetry - ADOT) for standardized metrics, traces, and logs. This allows flexibility in choosing observability backends (CloudWatch, AWS X-Ray, Prometheus, Grafana, etc.). Consider integrating Prometheus & Grafana (or Amazon Managed Services for them) for deeper EKS and application-specific monitoring.
 
 ## 8. Operational Excellence Considerations
 
