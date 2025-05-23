@@ -5,7 +5,7 @@ resource "helm_release" "karpenter_crd" {
   name       = "karpenter-crd"
   repository = "oci://public.ecr.aws/karpenter"
   chart      = "karpenter-crd"
-  version    = local.karpenter_helm_config.version
+  version    = "v1.4.0" # Updated to latest stable
   depends_on = [
     module.eks
   ]
@@ -15,7 +15,7 @@ locals {
   karpenter_helm_config = {
     chart            = "karpenter"
     repository       = "oci://public.ecr.aws/karpenter"
-    version          = "v0.36.1" # Specify a recent, stable version of Karpenter chart. Adjust as needed.
+    version          = "v1.4.0" # Updated to latest stable. Adjust as needed.
     namespace        = var.karpenter_service_account_namespace
     create_namespace = true      # Ensure the namespace exists if deploying to a dedicated 'karpenter' ns
   }
@@ -65,19 +65,30 @@ resource "helm_release" "karpenter" {
   }
   set {
     name = "controller.metrics.port"
-    value = "8080" # Default metrics port for Karpenter
+    value = "8000" # Updated metrics port for latest Karpenter version
   }
   values = [
     yamlencode({
       controller = {
         resources = {
           requests = {
-            cpu    = "100m"
-            memory = "256Mi"
+            cpu    = "200m"  # Increased from 100m for better performance
+            memory = "512Mi" # Increased from 256Mi for better performance
           }
           limits = {
             cpu    = "1"
             memory = "1Gi"
+          }
+        }
+        metrics = {
+          serviceMonitor = {
+            create = true  # Enable Prometheus ServiceMonitor creation
+          }
+        }
+        settings = {
+          aws = {
+            isolatedVPC = false  # Set to true if your VPC is isolated
+            defaultInstanceProfile = aws_iam_instance_profile.karpenter_node_instance_profile.name
           }
         }
       }
@@ -89,7 +100,7 @@ resource "helm_release" "karpenter" {
 
 resource "kubernetes_manifest" "karpenter_ec2nodeclass_x86" {
   manifest = {
-    apiVersion = "karpenter.k8s.aws/v1beta1"
+    apiVersion = "karpenter.k8s.aws/v1"
     kind       = "EC2NodeClass"
     metadata = {
       name      = "default-x86"
@@ -119,7 +130,7 @@ resource "kubernetes_manifest" "karpenter_ec2nodeclass_x86" {
 
 resource "kubernetes_manifest" "karpenter_ec2nodeclass_arm64" {
   manifest = {
-    apiVersion = "karpenter.k8s.aws/v1beta1"
+    apiVersion = "karpenter.k8s.aws/v1"
     kind       = "EC2NodeClass"
     metadata = {
       name      = "default-arm64"
@@ -151,7 +162,7 @@ resource "kubernetes_manifest" "karpenter_ec2nodeclass_arm64" {
 
 resource "kubernetes_manifest" "karpenter_nodepool_x86_spot" {
   manifest = {
-    apiVersion = "karpenter.sh/v1beta1"
+    apiVersion = "karpenter.sh/v1"
     kind       = "NodePool"
     metadata = {
       name      = "default-x86-spot"
@@ -194,7 +205,7 @@ resource "kubernetes_manifest" "karpenter_nodepool_x86_spot" {
 
 resource "kubernetes_manifest" "karpenter_nodepool_arm64_spot" {
   manifest = {
-    apiVersion = "karpenter.sh/v1beta1"
+    apiVersion = "karpenter.sh/v1"
     kind       = "NodePool"
     metadata = {
       name      = "default-arm64-spot"

@@ -19,5 +19,5 @@ variable "vpc_cidr" {
 variable "cluster_version" {
   description = "Kubernetes version for the EKS cluster in the production environment."
   type        = string
-  default     = "1.30" # Specify the desired EKS version for production
+  default     = "1.32" # Specify the desired EKS version for production
 } 
